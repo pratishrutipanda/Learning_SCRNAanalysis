@@ -1,0 +1,705 @@
+---
+title: "Single-Nucleus RNA-seq Analysis of Mouse Brain"
+date: "`r format(Sys.Date(), '%B %d, %Y')`"
+
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    number_sections: true
+    theme: readable
+    df_print: paged
+    highlight: tango
+    code_folding: show
+    self-contained: true
+    dev: png
+
+header-includes:
+  - |
+    <style>
+      .main-container {
+        max-width: 90%;
+        margin: auto;
+      }
+    </style>
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+library(plotly)
+library(Seurat)
+library(tidyverse)
+library(ggrepel)
+library(glmGamPoi)
+library(enrichR)
+library(reshape2)
+library(patchwork)
+base_theme <- theme(
+  axis.title.x = element_text(size = 10),       
+  axis.title.y = element_text(size = 10),       
+  axis.text.x  = element_text(size = 8),        
+  axis.text.y  = element_text(size = 8),        
+  plot.title   = element_text(size = 12, hjust = 0.5), 
+  legend.text  = element_text(size = 8),        
+  legend.title = element_text(size = 9),        
+  strip.text   = element_text(size = 9),        
+  )
+
+```
+
+Here, mouse single-nucleus RNA Seq data from [Zhou et al., 2020](https://pubmed.ncbi.nlm.nih.gov/31932797/) paper are analysed, comparing wild type (WT) and disease (5XFAD) samples. The paper studies Alzheimer’s disease (AD), which occurs when amyloid beta (Aβ) peptides produced by neurons form aggregates in the brain. As is known, this is followed by intraneuronal tau hyperphosphorylation and aggregation resulting in neuronal and synaptic dysfunction and cell death. Reactive astrocytosis and microgliosis are believed to be secondary cellular responses that occur in diseased brain regions.
+
+# Creating Seurat object for mouse brain datasets
+
+## Pre-processing GSM4173504: WT
+
+[GSM4173504_WT_1](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSM4173504) : Sample isolated single nuclei from brain of wild type mice at the age of 7 months.
+
+```{r}
+# WT
+counts_WT <- ReadMtx(mtx =  "C:/Users/HP/OneDrive/Desktop/SnRNASeq_MB/GSM4173504_WT_1/matrix.mtx.gz", cells = "C:/Users/HP/OneDrive/Desktop/SnRNASeq_MB/GSM4173504_WT_1/barcodes.tsv.gz", features = "C:/Users/HP/OneDrive/Desktop/SnRNASeq_MB/GSM4173504_WT_1/features.tsv.gz")
+data_WT <- CreateSeuratObject(counts = counts_WT, project = "WT_1", min.cells = 5, min.features = 5)
+data_WT[["percent.mt"]] <- PercentageFeatureSet(data_WT, pattern = "^mt-")
+
+range(data_WT$nCount_RNA)
+```
+
+UMI counts for cells in the WT dataset range from 501 - 35090. It is then filtered for UMI counts in the range [300,9000].
+
+```{r}
+range(data_WT$nFeature_RNA)
+```
+
+The number of unique genes in a cell in the WT dataset range from 300 - 8101. The cells are then filtered for number of unique genes in each cell in the range [300, 5600] as well as low percentage of mitochondrial genes(\<5% ).
+
+```{r}
+data_WT <- subset(data_WT, nCount_RNA >= 300 & nCount_RNA < 9001 & 
+                    nFeature_RNA >= 300 & nFeature_RNA < 5601 & 
+                    percent.mt < 5)
+data_WT$sample_name <- "WT"
+head(data_WT)
+```
+
+## Pre-processing GSM4173511: 5XFAD
+
+[GSM4173511_WT_5XFAD_2](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSM4173511) : Sample isolated single nuclei from brain of 5XFAD mice at the age of 7 months. The 5XFAD mice are a widely used transgenic mouse model for studying Alzheimer's disease (AD), focusing on amyloid-beta (Aβ) pathology.
+
+```{r}
+
+# 5XFAD
+counts_AD <- ReadMtx(
+  mtx = "C:/Users/HP/OneDrive/Desktop/SnRNASeq_MB/GSM4173511_AD_2/GSM4173511_WT_5XFAD_2_matrix.mtx.gz",
+  cells = "C:/Users/HP/OneDrive/Desktop/SnRNASeq_MB/GSM4173511_AD_2/GSM4173511_WT_5XFAD_2_barcodes.tsv.gz",
+  features = "C:/Users/HP/OneDrive/Desktop/SnRNASeq_MB/GSM4173511_AD_2/GSM4173511_WT_5XFAD_2_features.tsv.gz"
+)
+data_5XFAD <- CreateSeuratObject(counts = counts_AD, project = "AD_2", min.cells = 5, min.features = 100)
+
+data_5XFAD[["percent.mt"]] <- PercentageFeatureSet(data_5XFAD, pattern = "^mt-")
+range(data_5XFAD$nCount_RNA)
+```
+
+UMI counts for cells in WT dataset range from 499 - 24598. It is then filtered for UMI counts in the range [300,9000].
+
+```{r}
+range(data_5XFAD$nFeature_RNA)
+```
+
+The number of unique genes in a cell in WT dataset range from 244 - 6647. The cells are then filtered for number of unique genes in each cell in the range [300, 5600] as well as low percentage of mitochondrial genes(\<5% ).
+
+```{r}
+data_5XFAD <- subset(data_5XFAD, nCount_RNA >= 300 & nCount_RNA < 9001 & 
+                    nFeature_RNA >= 300 & nFeature_RNA < 5601 & 
+                    percent.mt < 5)
+data_5XFAD$sample_name <- "AD"
+head(data_5XFAD)
+```
+
+## Summary of the two datasets
+
+```{r}
+n_cells_WT <- ncol(data_WT[["RNA"]]@layers$counts)
+n_umis_WT <- sum(data_WT[["RNA"]]@layers$counts)
+n_genes_WT <- nrow(data_WT[["RNA"]]@layers$counts)
+
+
+n_cells_AD <- ncol(data_5XFAD[["RNA"]]@layers$counts)
+n_umis_AD <- sum(data_5XFAD[["RNA"]]@layers$counts)
+n_genes_AD <- nrow(data_5XFAD[["RNA"]]@layers$counts)
+
+summary_table <- data.frame(
+  Sample = c("WT", "5XFAD"),
+  Genes = c(n_genes_WT, n_genes_AD),
+  UMIs = c(n_umis_WT, n_umis_AD),
+  Cells = c(n_cells_WT, n_cells_AD)
+)
+
+summary_table
+
+```
+
+After filtering for quality of reads, WT dataset contains 9651 cells whereas AD dataset contains 4559
+
+## Creating a combined seurat object using WT and 5XFAD datasets
+
+```{r}
+objects <- merge(data_WT, y = data_5XFAD, add.cell.ids = c("WT", "AD"))
+saveRDS(objects, file = "C:/Users/HP/OneDrive/Desktop/SnRNASeq_MB/seurat_obj.rds")
+
+dim(objects)
+```
+
+The combined seurat object contains data on 18849 genes across 14210 cells overall.
+
+```{r}
+head(objects)
+```
+
+```{r}
+counts_wt <- GetAssayData(object = objects, assay = "RNA", layer = "counts.WT_1")
+counts_ad <- GetAssayData(object = objects, assay = "RNA", layer = "counts.AD_2")
+
+non_zero_entries_in_WT <- round(sum(counts_wt>0)/(dim(counts_wt)[1]*dim(counts_wt)[2]), 2)*100
+
+non_zero_entries_in_WT
+```
+
+```{r}
+non_zero_entries_in_AD <- round(sum(counts_ad>0)/(dim(counts_ad)[1]*dim(counts_ad)[2]), 2)*100
+non_zero_entries_in_AD
+```
+
+Approximately 11% of values in WT and 5XFAD count matrices are non-zero, after filtering for quality of samples.
+
+## Relation between Gene Mean Expression and Variance
+
+```{r}
+gene_mean_wt <- rowMeans(counts_wt)
+gene_var_wt <- apply(counts_wt, 1, var)
+
+gene_mean_ad <- rowMeans(counts_ad)
+gene_var_ad <- apply(counts_ad, 1, var)
+
+# WT plot
+p_wt <- ggplot(data.frame(gene_mean = gene_mean_wt, gene_variance = gene_var_wt),
+               aes(x = gene_mean, y = gene_variance)) +
+  geom_point(color = "blue", alpha = 0.5) +
+  geom_abline(color = "red") +
+  scale_x_log10() +
+  scale_y_log10() +
+  ggtitle("WT") +
+  xlab("Gene mean") +
+  ylab("Gene variance") +
+  theme_bw(base_size = 10)+base_theme
+
+# AD plot
+p_ad <- ggplot(data.frame(gene_mean = gene_mean_ad, gene_variance = gene_var_ad),
+               aes(x = gene_mean, y = gene_variance)) +
+  geom_point(color = "darkgreen", alpha = 0.5) +
+  geom_abline(color = "red") +
+  scale_x_log10() +
+  scale_y_log10() +
+  ggtitle("AD") +
+  xlab("Gene mean") +
+  ylab("Gene variance") +
+  theme_bw(base_size = 10) +base_theme
+
+p_wt + p_ad
+```
+
+```{r}
+AD<- FindVariableFeatures(object = data_5XFAD, selection.method = "vst")
+p2_ad <-VariableFeaturePlot(AD) +
+  ggtitle("5XFAD") +base_theme
+  
+WT<- FindVariableFeatures(object = data_WT, selection.method = "vst")
+p2_wt <-VariableFeaturePlot(WT) + ggtitle("WT")+base_theme
+
+p2_ad + p2_wt + plot_layout(ncol = 2, guides = "collect")
+
+
+```
+
+## Data Normalization
+
+To achieve minimal dependence of gene expression values on sequencing depth and technical noise, the data is normalised using SCTransform.
+
+```{r}
+
+objects <- SCTransform(objects, vst.flavor = "v2", verbose = TRUE)
+
+var.features <- VariableFeatures(objects)
+
+counts <- GetAssayData(object = objects, assay = "SCT", slot = "counts")
+
+sct.data <- GetAssayData(object = objects, assay = "SCT", slot = "data")
+
+corr.sct <- apply(
+  X = sct.data[intersect(var.features, rownames(sct.data)), ],
+  MARGIN = 1,
+  FUN = function(x) cor(x = x, y = colSums(counts))
+)
+counts_wt <- GetAssayData(object = objects, assay = "RNA", slot = "counts.WT_1")
+counts_ad <- GetAssayData(object = objects, assay = "RNA", slot = "counts.AD_2")
+
+cells_wt <- WhichCells(objects, expression = sample_name == "WT")
+cells_ad <- WhichCells(objects, expression = sample_name == "AD")
+
+var.features.wt <- VariableFeatures(FindVariableFeatures(subset(objects, cells = cells_wt)))
+var.features.ad <- VariableFeatures(FindVariableFeatures(subset(objects, cells = cells_ad)))
+
+
+objects <- NormalizeData(object = objects, assay = "RNA", scale.factor = 10000)
+
+lognormalized.data_WT <- GetAssayData(object = objects, assay = "RNA", slot = "data.WT_1")
+lognormalized.data_5XFAD <- GetAssayData(object = objects, assay = "RNA", slot = "data.AD_2")
+
+Idents(objects)<-objects$sample_name
+VlnPlot(objects, features = c("nCount_RNA", "nFeature_RNA", "percent.mt")) +base_theme
+
+corr.counts.ad <- apply(X = counts_ad[var.features.ad, ], MARGIN = 1,
+                        FUN = function(x) cor(x, colSums(counts_ad)))
+
+corr.lognorm.ad <- apply(X = lognormalized.data_5XFAD[var.features.ad, ], MARGIN = 1,
+                         FUN = function(x) cor(x, colSums(counts_ad)))
+corr.counts.wt <- apply(X = counts_wt[var.features.wt, ], MARGIN = 1,
+                        FUN = function(x) cor(x, colSums(counts_wt)))
+
+corr.lognorm.wt <- apply(X = lognormalized.data_WT[var.features.wt, ], MARGIN = 1,
+                         FUN = function(x) cor(x, colSums(counts_wt)))
+
+df <- data.frame(
+  corr = c(
+    corr.counts.wt,
+    corr.counts.ad,
+    corr.lognorm.wt,
+    corr.lognorm.ad,
+    corr.sct
+  ),
+  type = c(
+    rep("WT counts", length(corr.counts.wt)),
+    rep("AD counts", length(corr.counts.ad)),
+    rep("WT log-normalized", length(corr.lognorm.wt)),
+    rep("AD log-normalized", length(corr.lognorm.ad)),
+    rep("SCT normalized", length(corr.sct))
+  )
+)
+
+
+ggplot(df, aes(corr, fill = type)) +
+  geom_histogram(alpha = 0.5) + base_theme
+```
+
+<br>The graph shows distribution gene expression counts in each dataset and their correlation with sequencing depth of the cells in that dataset.
+
+## Dimensionality Reduction
+
+To visualise expression data for 18849 genes across samples, first linear dimensionality reduction method, PCA was used.
+
+```{r}
+
+all_genes <- unique(c(VariableFeatures(objects), "Clps", "Pla2g1b", "Pgc", "Cst7", "Vmn1r209", "Gal"))
+objects <- ScaleData(objects, features = all_genes)
+objects <- RunPCA(objects, features = all_genes, npcs = 50, verbose = TRUE)
+ElbowPlot(objects, ndims = 30)+base_theme
+```
+
+<br>The first 5 PCs capture about \~45% of standard deviation in dataset. Around PC30, the plot hits a plateau and the remaining components add only very small amount of additional variability. So, PC1 - PC30 are used for further analysis.
+
+To find 2-D representation of the data, while minimising for difference between the resultant and original [18849, 14210] dataset, data is processed through UMAP (Uniform Manifold Approximation and Projection).
+
+```{r}
+objects <-RunUMAP(object = objects, reduction = 'pca', dims = 1:30)
+DimPlot(objects) +base_theme
+
+```
+
+<br>The above plot shows the arrangement of cells in WT and 5XFAD datasets into various clusters in 2D space. Some clusters are overlapping in WT and 5XFAD whereas others vary in both density of cells in a given cluster as well as their arrangement.
+
+```{r}
+objects <- FindNeighbors(objects, reduction = 'pca', dims = 1:30)
+objects <- FindClusters(objects, resolution = 0.3)
+DimPlot(objects, label=TRUE, label.size = 4) + base_theme
+```
+
+<br>To find clusters of cells, potentially representing same cell type in brain tissue, the data is clustered. Here, the dataset is reduced to 17 different clusters.
+
+# Differential Expression Analysis in 5XFAD vs WT
+
+## Identifying overall upregulated and downregulated genes
+
+Here, genes which are differentially expressed in Alzheimer's disease model i.e. in the 5XFAD dataset as compared to WT mouse dataset are identified. For this, corrected counts from "SCT" assay are used.
+
+```{r}
+
+objects <- PrepSCTFindMarkers(objects, verbose = TRUE)
+Idents(objects)<- objects$sample_name
+
+all.markers <- FindMarkers(objects, ident.1 = "AD", ident.2 = "WT", verbose = TRUE)
+
+```
+
+Identifying significantly upregulated and downregulated genes using thresholds - \|avg_log2FC\| \> 0.5  and p_adj \<0.05
+
+```{r}
+all.markers$gene <- rownames(all.markers)
+all.markers$log10_pval <- -log10(all.markers$p_val_adj)
+all.markers$significant <- with(all.markers, 
+                                     ifelse(p_val_adj < 0.05 & abs(avg_log2FC) > 0.5, "Yes", "No")
+)
+
+write.csv(all.markers, file = "degs.csv", row.names = FALSE)
+
+top_genes <- all.markers[all.markers$significant == "Yes", ]
+top_genes <- top_genes[order(top_genes$avg_log2FC), ]
+
+head(top_genes)
+```
+
+```{r}
+de.pos = all.markers %>%
+  filter(avg_log2FC>0) %>% filter(p_val_adj<0.05) %>% pull (gene)
+length(de.pos)
+```
+
+```{r}
+de.neg = all.markers %>%
+  filter(avg_log2FC<0) %>% filter(p_val_adj<0.05) %>% pull (gene)
+length(de.neg)
+```
+
+```{r}
+top_upregulated_genes <- all.markers %>%
+  filter(p_val_adj < 0.05) %>%
+  filter(avg_log2FC >0.5) %>%
+  top_n(n = 5, wt = avg_log2FC)
+
+top_downregulated_genes <- all.markers %>%
+  filter(avg_log2FC < -0.5, p_val_adj < 0.5) %>%
+  arrange(avg_log2FC)%>%
+  head(5)
+
+top_upregulated_genes
+
+```
+
+```{r}
+top_downregulated_genes
+```
+
+181 genes were upregulated in 5XFAD as compared to WT, whereas 2067 of them were downregulated. The genes upregulated in 5XFAD include DAM genes like Cst7, Trem2 and Lilrb4a. Homeostatic genes like P2ry12, Trem119, Cx3cr1 and Selplg which are reported to be downregulated in microglial cluster, as reported by [Zhou et al., 2020](https://pubmed.ncbi.nlm.nih.gov/31932797/) were not statistically significant in this analysis, possibly because of not including replicate data of 5XFAD and WT samples.
+
+```{r}
+
+label_genes <- bind_rows(top_upregulated_genes, top_downregulated_genes)
+
+
+ggplot(top_genes, aes(x = avg_log2FC, y = log10_pval)) +
+  geom_point(color = "red", alpha = 0.9, size = 0.95) +
+  geom_vline(xintercept = c(-0.5, 0.5), linetype = "dashed") +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed") +
+  geom_text_repel(data = label_genes, aes(label = gene), size = 4, max.overlaps = 50) +
+  theme_bw(base_size = 10) +
+  labs(title = "Differentially expressed genes in  5XFAD vs WT (Overall) ", 
+       x = "Log2 Fold Change", 
+       y = "-log10 Adjusted P-value") +
+  theme(legend.position = "none") +base_theme
+
+```
+
+## Expression of marker genes in different clusters
+
+<br>The expression of known markers for different cell types of brain tissue will help identify cell clusters in UMAP previously obtained. For example, Slc17a7, Grin2a, Snap25 and Syt1 are known to be marker genes for excitatory neurons. Similarly, Gad1, Gad2, Sst and Npy are marker genes for interneurons, whereas Slc1a2, Gja1 and Aqp4 are markers for astrocytes.
+
+```{r heatmap, fig.width=20, fig.height=8}
+
+Idents(objects)<- objects$seurat_clusters
+
+DoHeatmap(objects, 
+          features = c(
+            "Grin1", "Syt1", "Snap25", "Grin2a", "Slc17a7", "Satb2", 
+            "Gad1", "Gad2", "Sst", "Npy", "Plp1", "Mbp", "Cldn11", "Mog", 
+            "Camk2a", "Cck", "Atp1a1", "Pde10a", "Tac1", "Penk", "Sdk2", 
+            "Col5a1", "Nptx1", "Pde1a", "Etl4", "Slc1a2", "Gja1", "Aqp4", 
+            "Hexb", "Csf1r", "C1qa", "P2ry12", "Pdgfra", "Vcan", "Cspg4", 
+            "Olig1", "Vtn", "Flt1", "Cldn5"
+          ), 
+          size = 3.5, angle = 90) +  base_theme +theme(legend.position = "right")
+```
+
+## Functional enrichment analysis of upregulated genes
+
+```{r}
+
+dbs<- listEnrichrDbs()
+#head(dbs)
+#grep("GO_", dbs$libraryName, value = TRUE)
+
+DoEnrichment <-function(genes) {
+  dbs <- c("GO_Molecular_Function_2023", "GO_Cellular_Component_2023", "GO_Biological_Processes_2023")
+  enriched<- enrichR::enrichr(genes, dbs)
+  return(enriched)
+}
+
+
+enrichment.pos <- DoEnrichment(genes = de.pos)
+
+p2 <- plotEnrich(enrichment.pos$GO_Cellular_Component_2023, showTerms = 10) +
+  theme_bw(base_size = 10) +
+  ggtitle("Upregulated (GO: Cellular Components)") +base_theme
+p3 <- plotEnrich(enrichment.pos$GO_Molecular_Function_2023, showTerms = 10) +
+  theme_bw(base_size = 10) +
+  ggtitle("Upregulated (GO: Molecular Functions)") +base_theme
+
+( p2 / p3) + plot_layout(guides = "collect")
+```
+
+<br>More than 30 upregulated genes are implicated in RNA binding and nucleic acid binding activity indicating transcriptional regulatory activity. 5 of them are also implicated in amyloid beta binding, which is directly related to Alzheimer's disease pathology. The enriched cellular components include polysomal ribosome, small/large ribosomal subunits, and ribosome, suggesting increased protein synthesis activity. Along with this enriched terms like secretory granule membrane, specific granule, and tertiary granule membrane indicate upregulation of secretory pathways, possibly related to immune response.
+
+## Functional enrichment analysis of downregulated genes
+
+```{r}
+
+enrichment.neg <- DoEnrichment(genes = de.neg)
+
+p2 <- plotEnrich(enrichment.neg$GO_Cellular_Component_2023, showTerms = 10) +
+  theme_bw(base_size = 10) +
+  ggtitle("Downregulated (GO: Cellular Components)")+base_theme
+p3 <- plotEnrich(enrichment.neg$GO_Molecular_Function_2023, showTerms = 10) +
+  theme_bw(base_size = 10) +
+  ggtitle("Downregulated (GO: Molecular Functions)") +base_theme
+( p2 / p3) + plot_layout(guides = "collect")
+
+```
+
+<br>A large number of downregulated genes are linked to ubiquitin or ubiquitin like proteins potentially regulating protein degradation pathways. Other downregulated molecular functions include lipid phosphatase activity, disulfide oxidoreductase activity, ATPase binding, and cell-cell adhesion mediator activity, possibly indicating impaired lipid signaling, reduced cellular redox balance, disrupted energy metabolism, and weakened intercellular communication. The downregulated cellular components include ER membrane, bounding membrane of organelle, lysosome, coated Vesicle and COPII-coated ER to Golgi transport vesicle indicating suppression of intracellular transport and organelle membrane integrity. The cellular components crucial to neuronal activity like neuron projection, axon, and dendrite are also enriched suggesting reduced neuronal activity and neurodegeneration.
+
+# Identifying Microglial sub-population
+
+## Proportions of clusters in 5XFAD and WT dataset
+
+```{r}
+DimPlot(objects, split.by = "sample_name", group.by = "seurat_clusters", label = TRUE) +base_theme
+
+```
+
+The clusters not only differ in number of cells but also in their arrangement in 5XFAD and WT.
+
+```{r}
+Idents(objects)<-objects$seurat_clusters
+sample_cluster_counts <- as.data.frame(table(
+  Sample = objects$sample_name,
+  Cluster = Idents(objects)
+))
+
+sample_props <- sample_cluster_counts %>%
+  group_by(Sample) %>%
+  mutate(Proportion = Freq / sum(Freq))
+
+custom_colors <- c(
+  "0" = "#332288",  "1" = "#88CCEE",  "2" = "#44AA99","3" = "#117733","4" = "#999933","5" = "#DDCC77",  "6" = "#661100",  "7" = "#CC6677",  "8" = "#AA4499",  "9" = "#882255","10" = "#E69F00", "11" = "#56B4E9","12" = "#009E73",  "13" = "#F0E442", "14" = "#0072B2", "15" = "#D55E00", "16" = "#CC79A7")
+
+
+ggplot(sample_props, aes(x = Sample, y = Proportion, fill = Cluster)) +
+  geom_bar(stat = "identity", position = "fill", color = "grey") +
+  coord_flip() +
+  ylab("Proportion of Clusters") +
+  xlab("Sample") +
+  theme_bw(base_size = 10) +
+  scale_fill_manual(values = custom_colors) +
+  ggtitle("Cluster Composition Within Each Sample") +base_theme 
+
+```
+<br>
+The proportion of clusters in 5XFAD and WT each dataset also varies. Some clusters have similar proportion in both datasets, like Cluster 8 and 16 whereas it changes drastically for others clusters like Cluster 6.
+
+## Expression of microglial marker genes across clusters
+
+To identify the cells in microglial subpopulation, the expression of microglia-specific markers like C1qa, P2ry12, Cx3cr1, Fcrls, Csf1r and Tyrobp are obtained. Of these, C1qa and Csf1r are homeostatic markers of microglia.
+
+```{r}
+
+FeaturePlot(objects, features = c("C1qa")) +base_theme
+```
+
+```{r}
+plots <- FeaturePlot(
+  objects,
+  features = c("C1qa", "Fcrls", "Tyrobp", "Csf1r", "Cx3cr1", "P2ry12"),
+  combine = FALSE
+)
+plots <- lapply(plots, function(p) {
+  p + base_theme +
+    theme(
+      axis.text.y = element_text(size = 6),
+      axis.text.x = element_text(size = 6),
+      axis.title = element_text(size = 8)
+    )
+})
+
+wrap_plots(plots, ncol = 2)
+ 
+```
+
+<br>The co-expression of microglial marker genes in same clusters suggests it to be a microglial cell population.
+
+```{r}
+VlnPlot(objects, features = c("C1qa", "Fcrls", "Tyrobp", "Csf1r", "Cx3cr1", "P2ry12") )
+```
+
+<br>The violin plots above show the expression patterns of the microglial marker genes across all identified clusters. All six markers show high and specific gene expression in Cluster 9, while having low expression in other clusters. So, this suggests that Cluster 9 represents a microglial subpopulation.
+
+```{r}
+microglia <- subset(objects, idents = 9)
+print(subset(sample_props, Cluster == "9"))
+```
+
+<br>Cluster 9 identified as the microglial sub-population forms 0.04% of cells from WT samples and 0.059% of total cells from 5XFAD samples. While microglial cells are known to increase in numbers in diseased brain, the above data is not conclusive.
+
+## Identifying differentially expressed genes in microglial cluster
+
+```{r}
+microglia <- PrepSCTFindMarkers(microglia)
+head(microglia)
+Idents(microglia)<- microglia$sample_name
+unique(Idents(microglia))
+microglia.markers <- FindMarkers(microglia, ident.1 = "AD", ident.2 = "WT", verbose = TRUE, recorrect_umi = FALSE)
+
+microglia.markers$gene <- rownames(microglia.markers)
+microglia.markers$log10_pval <- -log10(microglia.markers$p_val_adj)
+microglia.markers$significant <- with(microglia.markers, 
+                                     ifelse(p_val_adj < 0.05 & abs(avg_log2FC) > 0.5, "Yes", "No")
+)
+
+write.csv(microglia.markers, file = "microglia_degs.csv", row.names = FALSE)
+head(microglia.markers)
+```
+
+```{r}
+de.microglia.pos = microglia.markers %>%
+  filter(avg_log2FC>0) %>% filter(p_val_adj<0.05) %>% pull (gene)
+length(de.microglia.pos)
+```
+
+```{r}
+de.microglia.neg = microglia.markers %>%
+  filter(avg_log2FC<0) %>% filter(p_val_adj<0.05) %>% pull (gene)
+length(de.microglia.neg)
+
+```
+
+<br>Through this analysis, 121 genes were found to be upregulated in microglial sub-population of 5XFAD cells as compared to WT mice cells while 52 of them were down-regulated.
+
+```{r}
+top_genes <- microglia.markers[microglia.markers$significant == "Yes", ]
+top_genes <- top_genes[order(top_genes$avg_log2FC, decreasing = TRUE), ]
+
+head(top_genes)
+```
+
+<br>The genes upregulated in microglia include: -Cst7 (which inhibits papain and cathepsin L, and is speculated to play a role in immune regulation of haematopoietic system), -Ccl3 (which codes for monokine with inflammatory and cytokinetic properties ) and -Itgax (which codes for integrin alpha-X protein, which mediates cell-cell interaction durign infammatory response.) DAM genes, including Cst7, Csf1, Apoe, Trem2, Lilrb4a are all significantly upregulated in 5XFAD as compared to WT mice. In addition to this, homeostatic genes such as P2ry12, Selplg, and Tmem119 are downregulated in 5XFAD as compared to WT mice.
+
+```{r}
+top_up <- microglia.markers %>%
+  filter(p_val_adj < 0.05) %>%
+  filter(avg_log2FC >0.5) %>%
+  top_n(n = 5, wt = avg_log2FC)
+
+
+top_downregulated_genes <- microglia.markers %>%
+  filter(avg_log2FC < -0.5, p_val_adj < 0.5) %>%
+  arrange(avg_log2FC)%>%
+  head(5)
+
+```
+
+```{r}
+label_genes <- c("P2ry12", "Selplg", "Tmem119", "Cst7", "Csf1", "Apoe", "Trem2", "Lilrb4a")
+label_df <- top_genes %>% filter(gene %in% label_genes)
+
+ggplot(top_genes, aes(x = avg_log2FC, y = log10_pval)) +
+  geom_point(color = "red", alpha = 0.9, size = 0.8) +
+  geom_vline(xintercept = c(-0.5, 0.5), linetype = "dashed") +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed") +
+  geom_text_repel(data = label_df, aes(label = gene), size = 3.5, max.overlaps = 50) +
+  theme_bw(base_size = 10) +
+  labs(
+    title = "Microglial sub-population in 5XFAD vs WT", 
+    x = "Log2 Fold Change", 
+    y = "-log10 Adjusted P-value"
+  ) +
+  theme(legend.position = "none") +
+  base_theme
+
+```
+
+## Functional enrichment analysis of DEGs in microglial sub-population
+
+```{r}
+enrichment.microglia.pos <- DoEnrichment(genes = de.microglia.pos)
+
+p2 <- plotEnrich(enrichment.microglia.pos$GO_Cellular_Component_2023, showTerms = 10) +
+  ggtitle("Upregulated Genes in Microglia (GO: Cellular Components)")+ base_theme
+p3 <- plotEnrich(enrichment.microglia.pos$GO_Molecular_Function_2023, showTerms = 10) +
+  ggtitle("Upregulated Genes in Microglia (GO: Molecular Functions)")+ base_theme
+
+
+( p2 / p3) + plot_layout(guides = "collect")
+```
+
+```{r}
+enrichment.microglia.neg <- DoEnrichment(genes = de.microglia.neg)
+p1<-plotEnrich(df = enrichment.microglia.neg$GO_Molecular_Function_2023, showTerms = 10) + ggtitle("Downreg genes in Microglia (GO: Molecular Functions)") +base_theme
+p2<-plotEnrich(df = enrichment.microglia.neg$GO_Cellular_Component_2023, showTerms = 10) + ggtitle("Downreg genes in Microglia (GO: Cellular Components)") + base_theme
+p1 / p2
+```
+
+# Expression of gene "Cst7"
+
+From differential expression analysis in 5XFAD vs WT, we know that "Cst7" gene is one of the most upregulated genes in diseased microglial cells. It codes for the protein cystatin F (CF) and has been shown in literature to be among the robustly upregulated genes in the Disease Associated Microglia (DAM) signature.
+
+It is shown in [Michael JD et al. 2023](https://doi.org/10.7554/eLife.85279) that Cst7/CF played a role in microglial amyloid uptake and endolysosomal gene expression female mice and this led to a modest increase in Aβ plaque pathology in specific brain areas. This relationship between microglial phagocytosis and plaques is still an important question. This is counterintuitive, as microglial phagocytosis is typically thought to reduce plaques. However, some studies suggests that phagocytic microglia may contribute to plaque formation, rather than clearance.
+
+## Expression of "Cst7" in microglial cluster
+
+```{r}
+
+cst7_counts <- FetchData(objects, vars = "Cst7")
+sum(cst7_counts$Cst7 > 0)
+```
+
+```{r}
+FeaturePlot(objects, features = c("Cst7", "C1qa")) +base_theme
+```
+
+```{r}
+VlnPlot(objects, features = c("Cst7")) +base_theme
+```
+
+<br>Gene "Cst7" is a cluster-specific gene in this dataset where its overall expression is scanty with 108 counts across clusters. The gene is expressed in cluster 6 and cluster 9 (microglial subpopulation).
+
+## Expression of "Cst7" in microglial sub-clusters
+
+Reclustering microglial subpopulation showed that there is 1 distinct sub-cluster which constitutes 5XFAD sample and is enriched in Cst7 gene.
+
+```{r}
+microglia<- RunUMAP(microglia, reduction = "pca", dims = 1:30)
+DimPlot(microglia) +base_theme   
+```
+
+```{r}
+microglia <- FindNeighbors(microglia, reduction = "pca", dims = 1:30)
+microglia <-FindClusters(microglia, resolution = 0.3)
+DimPlot(microglia, label = TRUE) +base_theme
+```
+
+<br>Re-clustering microglial sub-population gives 4 sub-clusters. Of which, sub-clusters belonging to WT and those belonging to 5XFAD appear non-overlapping, implying cells from sub-clusters 1 and 3 make up most of 5XFAD sample, but are not present in WT sample. Further, we look at the expression of gene "Cst7" in these subclusters.
+
+```{r}
+FeaturePlot(microglia, features = c("Cst7")) +base_theme
+```
+
+```{r}
+VlnPlot(microglia, features = c("Cst7")) +base_theme
+```
+
+\<br\>Expression of Cst7 is enriched in sub-cluster 1, which is largely composed of cells from 5XFAD sample. The upregulation of Cst7/CF expression at both the RNA and protein level has been shown to be spatially localised to plaques ([Chen et al., 2020](https://www.cell.com/cell/fulltext/S0092-8674(20)30815-1?_returnURL=https%3A%2F%2Flinkinghub.elsevier.com%2Fretrieve%2Fpii%2FS0092867420308151%3Fshowall%3Dtrue)). It is possible that, Cst7 expression is driven by amyloid plaques present in Alzheimer's disease model "5XFAD" cells.
